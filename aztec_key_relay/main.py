@@ -139,11 +139,11 @@ def create_app(*, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     )
     app.include_router(keys_router.router)
 
-    @app.get("/health")
+    @app.get("/health", include_in_schema=False)
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/ready")
+    @app.get("/ready", include_in_schema=False)
     async def ready() -> dict[str, bool | str]:
         service = app_state.key_service
         if service is None or app_state.store is None or app_state.store.current_key() is None:
