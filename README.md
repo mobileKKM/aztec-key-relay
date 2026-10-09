@@ -13,7 +13,7 @@ Fetching it directly from every app install has a privacy cost: each device beco
 ## What it does
 
 - **Daily refresh** — a background task re-fetches the key at a fixed UTC hour (+ 15 min jitter).
-- **On-demand refresh** — `POST /v1/aztec-key/refresh` for when the app's assign/contract request failed (likely rotation). Rate-limited (default 60 s) so a fleet of failing clients can't hammer Firebase.
+- **On-demand refresh** — `POST /api/v1/aztec-key/refresh` for when the app's assign/contract request failed (likely rotation). Rate-limited (default 60 s) so a fleet of failing clients can't hammer Firebase.
 - **Fetch on startup only when the cache is empty** — fresh deployments serve a key immediately; restarts with a good key don't touch upstream.
 - **Never loses a good key** — upstream failures keep serving the cached key with `stale: true`; invalid PEMs (not RSA, < 2048 bits, unparseable) are rejected outright.
 - **Rotation history** — the last N keys (default 10) are kept in SQLite; the response's `version` increments on each *new* fingerprint.
@@ -22,12 +22,12 @@ Fetching it directly from every app install has a privacy cost: each device beco
 
 | Endpoint | Description |
 |---|---|
-| `GET /v1/aztec-key` | Cached key. Never triggers a fetch. `503` if none was ever fetched. `Cache-Control: public, max-age=300` (`private` when `RELAY_API_TOKEN` is set; configurable via `RELAY_CACHE_MAX_AGE`). |
-| `POST /v1/aztec-key/refresh` | Force an upstream fetch (single-flight). `429` + `Retry-After` inside the rate window; `502` if upstream fails (old key stays cached, marked stale). Never cacheable (`no-store`). |
+| `GET /api/v1/aztec-key` | Cached key. Never triggers a fetch. `503` if none was ever fetched. `Cache-Control: public, max-age=300` (`private` when `RELAY_API_TOKEN` is set; configurable via `RELAY_CACHE_MAX_AGE`). |
+| `POST /api/v1/aztec-key/refresh` | Force an upstream fetch (single-flight). `429` + `Retry-After` inside the rate window; `502` if upstream fails (old key stays cached, marked stale). Never cacheable (`no-store`). |
 | `GET /health` | Liveness. |
 | `GET /ready` | Readiness — `ready: true` once a key is cached. |
 
-`GET /v1/aztec-key` response:
+`GET /api/v1/aztec-key` response:
 
 ```json
 {
@@ -43,7 +43,7 @@ Fetching it directly from every app install has a privacy cost: each device beco
 
 The fingerprint is SHA-256 over the key's SPKI (DER) encoding — a stable rotation signal: the app can compare fingerprints to detect a changed key cheaply.
 
-When `RELAY_API_TOKEN` is set, the `/v1/*` endpoints require `Authorization: Bearer <token>`; unset = open.
+When `RELAY_API_TOKEN` is set, the `/api/v1/*` endpoints require `Authorization: Bearer <token>`; unset = open.
 
 ## How the upstream fetch works
 
@@ -60,12 +60,12 @@ Copy `.env.example` to `.env`. Everything has working defaults; the interesting 
 
 | Variable | Default | |
 |---|---|---|
-| `RELAY_API_TOKEN` | *(unset)* | Bearer token for `/v1/*`; unset = open. |
+| `RELAY_API_TOKEN` | *(unset)* | Bearer token for `/api/v1/*`; unset = open. |
 | `RELAY_MIN_FETCH_INTERVAL` | `60` | Min seconds between upstream fetches (refresh endpoint). |
 | `RELAY_DAILY_REFRESH_HOUR` | `4` | UTC hour for the daily refresh. |
 | `RELAY_DB_PATH` | `data/state.db` | SQLite path (key history + installation identity). |
 | `RELAY_KEY_HISTORY` | `10` | Historical keys to keep. |
-| `RELAY_CACHE_MAX_AGE` | `300` | `Cache-Control` max-age (seconds) for `GET /v1/aztec-key`. |
+| `RELAY_CACHE_MAX_AGE` | `300` | `Cache-Control` max-age (seconds) for `GET /api/v1/aztec-key`. |
 
 ## Run
 

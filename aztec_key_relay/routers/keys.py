@@ -13,7 +13,7 @@ from ..service import KeyEnvelope, KeyService, KeyUnavailableError, RefreshRateL
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1")
+router = APIRouter(prefix="/api/v1")
 
 
 def get_key_service() -> KeyService:
