@@ -9,6 +9,20 @@ from fastapi.testclient import TestClient
 
 from aztec_key_relay import main
 from aztec_key_relay.config import get_settings
+
+# Synthetic upstream identifiers for every test — required fields since the
+# real ones moved out of the code into .env. Env vars beat the local .env,
+# so tests stay deterministic and free of real identifiers.
+_TEST_ENV = {
+    "FIREBASE_PROJECT_ID": "123456789012",
+    "FIREBASE_APP_ID": "1:123456789012:android:abcdef0123456789abcdef0",
+    "FIREBASE_API_KEY": "AIzaSyTEST-KEY-0000000000000000000000000",
+    "FIREBASE_ANDROID_PACKAGE": "pl.example.app",
+    "FIREBASE_ANDROID_CERT": "A" * 40,
+    "FIREBASE_RC_SDK_VERSION": "23.0.0",
+    "FIREBASE_APP_BUILD": "100000001",
+}
+os.environ.update(_TEST_ENV)
 from aztec_key_relay.keys import fingerprint, parse_public_key
 
 # The currently deployed aztecKey from mobile_kkm's ekp_crypto — a public

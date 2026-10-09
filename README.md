@@ -6,7 +6,7 @@ Small [FastAPI](https://fastapi.tiangolo.com/) service that fetches the **`aztec
 
 ## Why
 
-The key lives in Firebase Remote Config (project `PROJECT_ID`, key `aztecKey`) and can be **rotated server-side at any time**. Today a rotation means re-capturing traffic with mitmproxy and shipping an app update.
+The key lives in Firebase Remote Config (project id in `.env`, key `aztecKey`) and can be **rotated server-side at any time**. Today a rotation means re-capturing traffic with mitmproxy and shipping an app update.
 
 Fetching it directly from every app install has a privacy cost: each device becomes a separate **Firebase Installation** (FID + auth tokens + IP) in Google's records. This relay reduces that to **one shared installation** — end-user devices never contact Google at all; they only talk to this service.
 

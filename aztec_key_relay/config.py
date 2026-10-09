@@ -11,14 +11,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # ── Upstream (Firebase) — the official app's public identifiers ──────────
-    firebase_project_id: str = "PROJECT_ID"
-    firebase_app_id: str = "APP_ID"
-    firebase_api_key: str = "API_KEY"
-    firebase_android_package: str = "ANDROID_PACKAGE"
-    firebase_android_cert: str = "ANDROID_CERT"
-    firebase_rc_sdk_version: str = "23.0.0"
-    firebase_app_build: str = "APP_BUILD"
+    # ── Upstream (Firebase) — the official app's identifiers. Not defaulted:
+    # set them in .env (see .env.example). All ship inside the official APK.
+    firebase_project_id: str
+    firebase_app_id: str
+    firebase_api_key: str
+    firebase_android_package: str
+    firebase_android_cert: str
+    firebase_rc_sdk_version: str
+    firebase_app_build: str
     # The RC SDK's device context (values from the capture — the capture
     # device: en-US locale, US country code, Warsaw timezone, Android 14 /
     # API 34 emulator image).

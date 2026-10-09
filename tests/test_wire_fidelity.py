@@ -16,6 +16,8 @@ from conftest import REAL_AZTEC_KEY_PEM
 from aztec_key_relay.config import Settings
 from aztec_key_relay.firebase import FirebaseClient, TemplateUnchangedError
 
+ETAG = "etag-test-firebase-fetch"
+
 # The exact body the official app sent (capture, 2026-10-08), with the
 # instance-specific values parameterized — field ORDER matters (JSONObject
 # preserves insertion order).
@@ -36,6 +38,7 @@ CAPTURED_BODY_FIELDS = [
 
 
 def captured_headers(request: httpx.Request) -> dict[str, str]:
+    Settings()
     return {k.decode(): v.decode() for k, v in request.headers.raw}
 
 
@@ -58,6 +61,7 @@ def make_client(captured: list[httpx.Request], *, etag: str | None = None, statu
 
 
 async def test_rc_headers_match_capture() -> None:
+    s = Settings()
     captured: list[httpx.Request] = []
     async with make_client(captured) as http:
         client = FirebaseClient(Settings(), http)
@@ -73,27 +77,29 @@ async def test_rc_headers_match_capture() -> None:
     assert headers["X-Google-GFE-Can-Retry"] == "yes"
     assert headers["Accept-Encoding"] == "gzip", "httpx default is 'gzip, deflate'"
     assert headers["Connection"] == "Keep-Alive"
-    assert headers["X-Goog-Api-Key"] == Settings().firebase_api_key
-    assert headers["X-Android-Package"] == "ANDROID_PACKAGE"
-    assert headers["X-Android-Cert"] == "ANDROID_CERT"
+    assert headers["X-Goog-Api-Key"] == s.firebase_api_key
+    assert headers["X-Android-Package"] == s.firebase_android_package
+    assert headers["X-Android-Cert"] == s.firebase_android_cert
     assert headers["X-Goog-Firebase-Installations-Auth"] == "auth-token"
     assert "python-httpx" not in headers.get("User-Agent", "")
 
 
 async def test_cache_miss_sends_no_if_none_match() -> None:
     """First fetch (no cached ETag) must omit If-None-Match — like the captured miss."""
+    Settings()
     captured: list[httpx.Request] = []
-    async with make_client(captured, etag="etag-PROJECT_ID-firebase-fetch-CAPTURED_ETAG_NUMBER") as http:
+    async with make_client(captured, etag=ETAG) as http:
         client = FirebaseClient(Settings(), http)
         await client.fetch_aztec_key()
         await client.fetch_aztec_key()
 
     first, second = [r for r in captured if "firebaseremoteconfig" in r.url.host]
     assert "If-None-Match" not in captured_headers(first), "miss must not revalidate"
-    assert captured_headers(second)["If-None-Match"] == "etag-PROJECT_ID-firebase-fetch-CAPTURED_ETAG_NUMBER"
+    assert captured_headers(second)["If-None-Match"] == ETAG
 
 
 async def test_rc_body_matches_capture_exactly() -> None:
+    s = Settings()
     captured: list[httpx.Request] = []
     async with make_client(captured) as http:
         client = FirebaseClient(Settings(), http)
@@ -108,9 +114,9 @@ async def test_rc_body_matches_capture_exactly() -> None:
     assert body["platformVersion"] == "34"
     assert body["timeZone"] == "Europe/Warsaw"
     assert body["languageCode"] == "en-US"
-    assert body["appBuild"] == "APP_BUILD"
-    assert body["sdkVersion"] == "23.0.0"
-    assert body["packageName"] == "ANDROID_PACKAGE"
+    assert body["appBuild"] == s.firebase_app_build
+    assert body["sdkVersion"] == s.firebase_rc_sdk_version
+    assert body["packageName"] == s.firebase_android_package
     assert body["analyticsUserProperties"] == {}
     assert body["appInstanceIdToken"] == "auth-token"
 
@@ -128,15 +134,16 @@ async def test_body_serialization_is_compact_and_escapes_slashes() -> None:
 
 
 async def test_etag_revalidation_sent_on_second_fetch() -> None:
+    Settings()
     captured: list[httpx.Request] = []
-    async with make_client(captured, etag="etag-PROJECT_ID-firebase-fetch-CAPTURED_ETAG_NUMBER") as http:
+    async with make_client(captured, etag=ETAG) as http:
         client = FirebaseClient(Settings(), http)
         await client.fetch_aztec_key()
         await client.fetch_aztec_key()
 
     first, second = [r for r in captured if "firebaseremoteconfig" in r.url.host]
     assert "If-None-Match" not in {k.decode() for k in dict(first.headers.raw)}
-    assert captured_headers(second).get("If-None-Match") == "etag-PROJECT_ID-firebase-fetch-CAPTURED_ETAG_NUMBER"
+    assert captured_headers(second).get("If-None-Match") == ETAG
 
 
 async def test_http_304_raises_template_unchanged() -> None:
@@ -173,6 +180,7 @@ async def test_no_change_state_raises_template_unchanged() -> None:
 
 
 async def test_installation_requests_headers() -> None:
+    s = Settings()
     captured: list[httpx.Request] = []
     async with make_client(captured) as http:
         client = FirebaseClient(Settings(), http)
@@ -182,9 +190,9 @@ async def test_installation_requests_headers() -> None:
     headers = captured_headers(install)
     assert headers["User-Agent"].startswith("Dalvik/")
     assert headers["Content-Type"] == "application/json"
-    assert headers["X-Goog-Api-Key"] == Settings().firebase_api_key
-    assert headers["X-Android-Package"] == "ANDROID_PACKAGE"
-    assert headers["X-Android-Cert"] == "ANDROID_CERT"
+    assert headers["X-Goog-Api-Key"] == s.firebase_api_key
+    assert headers["X-Android-Package"] == s.firebase_android_package
+    assert headers["X-Android-Cert"] == s.firebase_android_cert
     assert headers["Accept-Encoding"] == "gzip"
     body = json.loads(install.content)
     assert list(body.keys()) == ["fid", "appId", "authVersion"]
