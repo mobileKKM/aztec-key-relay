@@ -57,7 +57,7 @@ def make_client(captured: list[httpx.Request], *, etag: str | None = None, statu
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-async def test_no_python_fingerprint_headers() -> None:
+async def test_rc_headers_match_capture() -> None:
     captured: list[httpx.Request] = []
     async with make_client(captured) as http:
         client = FirebaseClient(Settings(), http)
@@ -65,16 +65,32 @@ async def test_no_python_fingerprint_headers() -> None:
 
     rc = next(r for r in captured if "firebaseremoteconfig" in r.url.host)
     headers = captured_headers(rc)
-    assert headers.get("User-Agent", "") == "", "UA must be absent/empty — python-httpx/… is a fingerprint"
-    assert "Accept" not in headers or headers["Accept"] == ""
+    # The authoritative set from the captured official-app fetch (miss AND hit).
+    assert headers["User-Agent"] == ("Dalvik/2.1.0 (Linux; U; Android 14; Android SDK built for arm64 Build/UE1A.230829.036.A1)")
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Accept"] == "application/json"
+    assert headers["X-Firebase-RC-Fetch-Type"] == "BASE/1"
+    assert headers["X-Google-GFE-Can-Retry"] == "yes"
     assert headers["Accept-Encoding"] == "gzip", "httpx default is 'gzip, deflate'"
     assert headers["Connection"] == "Keep-Alive"
-    assert "Content-Type" not in headers, "captured RC POST has no Content-Type"
-    assert headers["X-Google-GFE-Can-Retry"] == "yes"
     assert headers["X-Goog-Api-Key"] == Settings().firebase_api_key
     assert headers["X-Android-Package"] == "ANDROID_PACKAGE"
     assert headers["X-Android-Cert"] == "ANDROID_CERT"
     assert headers["X-Goog-Firebase-Installations-Auth"] == "auth-token"
+    assert "python-httpx" not in headers.get("User-Agent", "")
+
+
+async def test_cache_miss_sends_no_if_none_match() -> None:
+    """First fetch (no cached ETag) must omit If-None-Match — like the captured miss."""
+    captured: list[httpx.Request] = []
+    async with make_client(captured, etag="etag-PROJECT_ID-firebase-fetch-CAPTURED_ETAG_NUMBER") as http:
+        client = FirebaseClient(Settings(), http)
+        await client.fetch_aztec_key()
+        await client.fetch_aztec_key()
+
+    first, second = [r for r in captured if "firebaseremoteconfig" in r.url.host]
+    assert "If-None-Match" not in captured_headers(first), "miss must not revalidate"
+    assert captured_headers(second)["If-None-Match"] == "etag-PROJECT_ID-firebase-fetch-CAPTURED_ETAG_NUMBER"
 
 
 async def test_rc_body_matches_capture_exactly() -> None:
@@ -164,11 +180,12 @@ async def test_installation_requests_headers() -> None:
 
     install = next(r for r in captured if "firebaseinstallations" in r.url.host and "authTokens" not in r.url.path)
     headers = captured_headers(install)
-    assert headers.get("User-Agent", "") == ""
+    assert headers["User-Agent"].startswith("Dalvik/")
     assert headers["Content-Type"] == "application/json"
     assert headers["X-Goog-Api-Key"] == Settings().firebase_api_key
     assert headers["X-Android-Package"] == "ANDROID_PACKAGE"
     assert headers["X-Android-Cert"] == "ANDROID_CERT"
+    assert headers["Accept-Encoding"] == "gzip"
     body = json.loads(install.content)
     assert list(body.keys()) == ["fid", "appId", "authVersion"]
     assert body["fid"][0] in "cdef"

@@ -19,14 +19,16 @@ class Settings(BaseSettings):
     firebase_android_cert: str = "ANDROID_CERT"
     firebase_rc_sdk_version: str = "23.0.0"
     firebase_app_build: str = "APP_BUILD"
-    # Request-body context fields the RC SDK sends (values from the capture —
-    # the capture device: en-US locale, US country code, Warsaw timezone,
-    # Android 14 / API 34 emulator).
+    # The RC SDK's device context (values from the capture — the capture
+    # device: en-US locale, US country code, Warsaw timezone, Android 14 /
+    # API 34 emulator image).
     firebase_app_version: str = "1.6.10"
     firebase_country_code: str = "US"
     firebase_platform_version: str = "34"
     firebase_time_zone: str = "Europe/Warsaw"
     firebase_language_code: str = "en-US"
+    # The UA the RC SDK's OkHttp-backed transport sends (capture-confirmed).
+    firebase_user_agent: str = "Dalvik/2.1.0 (Linux; U; Android 14; Android SDK built for arm64 Build/UE1A.230829.036.A1)"
 
     # ── Service behaviour ────────────────────────────────────────────────────
     relay_api_token: str | None = None

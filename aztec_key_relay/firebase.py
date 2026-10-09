@@ -126,14 +126,15 @@ class FirebaseClient:
         }
 
     @staticmethod
-    def _sdk_headers() -> dict[str, str]:
-        """FIS/RC SDK transport defaults: no User-Agent, no Accept header.
-
-        The captured official-app requests carry none of okhttp's usual
-        `User-Agent`/`Accept`; the SDKs strip them. httpx otherwise
-        advertises `python-httpx/…` — an instant fingerprint.
+    def _sdk_headers(ua: str | None = None) -> dict[str, str]:
+        """Transport headers of the SDK's OkHttp stack, per the capture:
+        Dalvik UA, `Connection: Keep-Alive`, `Accept-Encoding: gzip` — and
+        no httpx defaults leaking (python-httpx UA, 'gzip, deflate').
         """
-        return {"User-Agent": "", "Accept": "", "Accept-Encoding": "gzip", "Connection": "Keep-Alive"}
+        headers = {"Accept-Encoding": "gzip", "Connection": "Keep-Alive"}
+        if ua:
+            headers["User-Agent"] = ua
+        return headers
 
     @staticmethod
     def _sdk_json_body(fields: dict[str, Any]) -> bytes:
@@ -146,14 +147,19 @@ class FirebaseClient:
         return json.dumps(fields, separators=(",", ":"), ensure_ascii=False).replace("/", "\\/").encode()
 
     async def _fetch_rc(self, installation: Installation) -> tuple[dict[str, Any], httpx.Headers]:
+        # Header set replicated 1:1 from the captured official-app fetch
+        # (both cache-miss and cache-hit variants; 2026-09-30/10-08 captures).
         headers = {
-            **self._sdk_headers(),
             "X-Goog-Api-Key": self._settings.firebase_api_key,
             "X-Android-Package": self._settings.firebase_android_package,
             "X-Android-Cert": self._settings.firebase_android_cert,
             "X-Google-GFE-Can-Retry": "yes",
             "X-Goog-Firebase-Installations-Auth": installation.auth.token,
-            # No Content-Type — the captured official-app request has none.
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Firebase-RC-Fetch-Type": "BASE/1",
+            "User-Agent": self._settings.firebase_user_agent,
+            **self._sdk_headers(),
         }
         if self._rc_etag:
             headers["If-None-Match"] = self._rc_etag
@@ -187,7 +193,7 @@ class FirebaseClient:
                 "Content-Type": "application/json",
                 "X-Goog-Api-Key": self._settings.firebase_api_key,
                 **self._android_headers(),
-                **self._sdk_headers(),
+                **self._sdk_headers(self._settings.firebase_user_agent),
             },
             content=self._sdk_json_body({"fid": fid, "appId": self._settings.firebase_app_id, "authVersion": "FIS_v2"}),
         )
@@ -204,7 +210,7 @@ class FirebaseClient:
                 "Content-Type": "application/json",
                 "X-Goog-Api-Key": self._settings.firebase_api_key,
                 **self._android_headers(),
-                **self._sdk_headers(),
+                **self._sdk_headers(self._settings.firebase_user_agent),
             },
             # The endpoint rejects any body fields ("Unknown name …") — the
             # official SDK sends an empty JSON object.
