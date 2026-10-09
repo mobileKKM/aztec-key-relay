@@ -84,11 +84,14 @@ def build_app(
     api_token: str | None = None,
     min_fetch_interval: int = 0,
     db_dir: str | None = None,
+    pre_arm: callable | None = None,
 ) -> tuple[TestClient, FakeFirebase]:
     """Builds a TestClient whose upstream is FakeFirebase.
 
     Settings flow through real env vars (pydantic-settings reads them), so
     the router's `Depends(get_settings)` sees the same values as lifespan.
+    [pre_arm] runs against the FakeFirebase before the app starts — for
+    arming startup-fetch failures.
     """
     fake = FakeFirebase(keys)
     env = {
@@ -103,6 +106,8 @@ def build_app(
     saved = {k: os.environ.get(k) for k in env}
     os.environ.update(env)
     get_settings.cache_clear()
+    if pre_arm:
+        pre_arm(fake)
     try:
         client = TestClient(main.create_app(transport=fake.transport))
         client.__enter__()

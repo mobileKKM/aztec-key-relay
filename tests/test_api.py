@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from conftest import REAL_AZTEC_KEY_PEM, build_app, generate_pkcs1_pem
 
 
@@ -126,6 +128,67 @@ def test_health_endpoint(tmp_path) -> None:
     client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
     try:
         assert client.get("/health").json() == {"status": "ok"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_cache_control_headers(tmp_path) -> None:
+    """Open mode: public + max-age — intermediary caches may serve repeats."""
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
+    try:
+        response = client.get("/v1/aztec-key")
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "public, max-age=300"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_cache_control_private_when_auth_enabled(tmp_path) -> None:
+    """Bearer-auth mode: private — shared caches must not store token responses."""
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], api_token="sekrit", db_dir=str(tmp_path))
+    try:
+        response = client.get("/v1/aztec-key", headers={"Authorization": "Bearer sekrit"})
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "private, max-age=300"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_refresh_responses_are_never_cacheable(tmp_path) -> None:
+    # 429 (rate limited) must not be cached.
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=60, db_dir=str(tmp_path))
+    try:
+        rate_limited = client.post("/v1/aztec-key/refresh")
+        assert rate_limited.status_code == 429
+        assert rate_limited.headers["Cache-Control"] == "no-store"
+    finally:
+        client.__exit__(None, None, None)
+
+    # 502 (upstream failure) must not be cached either.
+    client2, fake2 = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path))
+    try:
+        fake2.rc_failures_remaining = 99
+        failed = client2.post("/v1/aztec-key/refresh")
+        assert failed.status_code == 502
+        assert failed.headers["Cache-Control"] == "no-store"
+    finally:
+        client2.__exit__(None, None, None)
+
+
+def test_503_when_no_key_is_not_cacheable(tmp_path) -> None:
+    """A cached 503 would mask a fast recovery — must be no-store."""
+    # Startup fetch fails → no key cached → GET serves 503.
+    empty_dir = str(tmp_path) + "_empty"
+    os.makedirs(empty_dir, exist_ok=True)
+
+    def arm_failures(fake) -> None:
+        fake.rc_failures_remaining = 99
+
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=empty_dir, pre_arm=arm_failures)
+    try:
+        response = client.get("/v1/aztec-key")
+        assert response.status_code == 503
+        assert response.headers["Cache-Control"] == "no-store"
     finally:
         client.__exit__(None, None, None)
 

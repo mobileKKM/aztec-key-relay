@@ -22,8 +22,8 @@ Fetching it directly from every app install has a privacy cost: each device beco
 
 | Endpoint | Description |
 |---|---|
-| `GET /v1/aztec-key` | Cached key. Never triggers a fetch. `503` if none was ever fetched. |
-| `POST /v1/aztec-key/refresh` | Force an upstream fetch (single-flight). `429` + `Retry-After` inside the rate window; `502` if upstream fails (old key stays cached, marked stale). |
+| `GET /v1/aztec-key` | Cached key. Never triggers a fetch. `503` if none was ever fetched. `Cache-Control: public, max-age=300` (`private` when `RELAY_API_TOKEN` is set; configurable via `RELAY_CACHE_MAX_AGE`). |
+| `POST /v1/aztec-key/refresh` | Force an upstream fetch (single-flight). `429` + `Retry-After` inside the rate window; `502` if upstream fails (old key stays cached, marked stale). Never cacheable (`no-store`). |
 | `GET /health` | Liveness. |
 | `GET /ready` | Readiness — `ready: true` once a key is cached. |
 
@@ -65,6 +65,7 @@ Copy `.env.example` to `.env`. Everything has working defaults; the interesting 
 | `RELAY_DAILY_REFRESH_HOUR` | `4` | UTC hour for the daily refresh. |
 | `RELAY_DB_PATH` | `data/state.db` | SQLite path (key history + installation identity). |
 | `RELAY_KEY_HISTORY` | `10` | Historical keys to keep. |
+| `RELAY_CACHE_MAX_AGE` | `300` | `Cache-Control` max-age (seconds) for `GET /v1/aztec-key`. |
 
 ## Run
 

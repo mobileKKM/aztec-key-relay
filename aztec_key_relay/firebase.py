@@ -250,17 +250,18 @@ class FirebaseClient:
         their cached key, exactly like the official client's fallback.
         """
         for attempt in (0, 1):
-            installation = await self.ensure_installation()
-            assert installation.auth is not None
             try:
+                installation = await self.ensure_installation()
                 data, resp_headers = await self._fetch_rc(installation)
             except FirebaseError:
-                # A revoked FID (server prunes idle installations) manifests as
-                # auth failure — start over with a fresh installation once.
+                # A revoked/inconsistent FID (server prunes idle installations;
+                # a fresh FID can 404 on token generation) — start over with a
+                # fresh installation once.
                 if attempt == 0:
                     self._installation = None
                     continue
                 raise
+            assert installation.auth is not None
 
             if etag := resp_headers.get("ETag"):
                 self._rc_etag = etag
