@@ -1,0 +1,35 @@
+[project]
+name = "aztec-key-relay"
+version = "0.1.0"
+description = "Small FastAPI service relaying the mKKM aztecKey RSA public key from Firebase Remote Config"
+readme = "README.md"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.115.0",
+    "httpx>=0.28.0",
+    "pydantic-settings>=2.7.0",
+    "cryptography>=44.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.16",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint.isort]
+known-first-party = ["aztec_key_relay"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]

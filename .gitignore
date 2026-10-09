@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Local state (SQLite db with the FID credentials + key history)
+data/*.db
+data/*.db-*
+
+# Environment
+.env
+
+# uv
+# uv.lock is committed for reproducible deploys
