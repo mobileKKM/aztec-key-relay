@@ -47,6 +47,7 @@ class FakeFirebase:
         self.rc_fetches = 0
         self.fail_next_rc = False
         self.rc_failures_remaining = 0
+        self.etag_304_next = False
 
         async def handler(request: httpx.Request) -> httpx.Response:
             url = request.url
@@ -62,9 +63,16 @@ class FakeFirebase:
                     if self.rc_failures_remaining > 0:
                         self.rc_failures_remaining -= 1
                     return httpx.Response(500, text="boom")
+                if self.etag_304_next:
+                    self.etag_304_next = False
+                    return httpx.Response(304, headers={"ETag": "etag-1"})
                 self.rc_fetches += 1
                 key = self.keys[min(self.rc_fetches - 1, len(self.keys) - 1)]
-                return httpx.Response(200, json={"state": "UPDATE", "entries": {"aztecKey": key}})
+                return httpx.Response(
+                    200,
+                    headers={"ETag": "etag-1"},
+                    json={"state": "UPDATE", "entries": {"aztecKey": key}},
+                )
             return httpx.Response(404, text=f"unexpected {url.host}")
 
         self.transport = httpx.MockTransport(handler)

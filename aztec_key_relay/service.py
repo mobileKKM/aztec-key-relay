@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from .config import Settings
-from .firebase import FirebaseClient
+from .firebase import FirebaseClient, TemplateUnchangedError
 from .keys import InvalidKeyError, KeyRecord, parse_public_key, validate_aztec_key
 from .store import Store
 
@@ -110,7 +110,14 @@ class KeyService:
                     raise RefreshRateLimitedError(min_interval - elapsed)
             self._last_fetch_attempt = now
 
-            raw = await self._firebase.fetch_aztec_key()
+            try:
+                raw = await self._firebase.fetch_aztec_key()
+            except TemplateUnchangedError:
+                # 304: upstream confirmed our cached key is still current.
+                current = await self.current()
+                self._stale = False
+                logger.info("key unchanged upstream (HTTP 304)")
+                return current
             key, fingerprint = validate_aztec_key(raw)
             was_stale = self._stale
             record = self._store.save_key(

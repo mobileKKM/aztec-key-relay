@@ -128,3 +128,16 @@ def test_health_endpoint(tmp_path) -> None:
         assert client.get("/health").json() == {"status": "ok"}
     finally:
         client.__exit__(None, None, None)
+
+
+def test_304_during_refresh_serves_cached_key(tmp_path) -> None:
+    """A 304 upstream means 'unchanged' — the API returns the cached key, 200."""
+    client, fake = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path))
+    try:
+        fake.etag_304_next = True
+        response = client.post("/v1/aztec-key/refresh")
+        assert response.status_code == 200
+        assert response.json()["pem"] == REAL_AZTEC_KEY_PEM
+        assert response.json()["stale"] is False
+    finally:
+        client.__exit__(None, None, None)

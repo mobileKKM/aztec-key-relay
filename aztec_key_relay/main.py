@@ -24,7 +24,7 @@ from fastapi import FastAPI
 
 from . import __version__
 from .config import get_settings
-from .firebase import FirebaseClient, FirebaseError
+from .firebase import FirebaseClient, FirebaseError, TemplateUnchangedError
 from .keys import InvalidKeyError
 from .routers import keys as keys_router
 from .service import KeyService
@@ -65,6 +65,8 @@ async def _daily_refresh_loop(service: KeyService, hour_utc: int) -> None:
         await asyncio.sleep(wait)
         try:
             await service.refresh(force=True)
+        except TemplateUnchangedError:
+            logger.info("daily refresh: key unchanged upstream (HTTP 304)")
         except (FirebaseError, InvalidKeyError) as exc:
             logger.warning("daily refresh failed (cached key kept, marked stale): %s", exc)
             await service.mark_stale()
@@ -74,9 +76,11 @@ async def _daily_refresh_loop(service: KeyService, hour_utc: int) -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     app_state.api_token = settings.relay_api_token
+    # No default headers: each FirebaseClient call sets the exact SDK header
+    # set (empty UA, `Accept-Encoding: gzip`, `Connection: Keep-Alive`) so we
+    # never advertise python-httpx upstream.
     app_state.http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(10.0, read=20.0),
-        headers={"User-Agent": "aztec-key-relay/0.1"},
         transport=app_state.transport,
     )
     app_state.store = Store(settings.relay_db_path)

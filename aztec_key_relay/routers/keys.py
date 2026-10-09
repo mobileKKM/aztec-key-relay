@@ -7,7 +7,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
-from ..firebase import FirebaseError
+from ..firebase import FirebaseError, TemplateUnchangedError
 from ..keys import InvalidKeyError
 from ..service import KeyEnvelope, KeyService, KeyUnavailableError, RefreshRateLimitedError
 
@@ -56,6 +56,9 @@ async def refresh_aztec_key() -> KeyEnvelope:
     service = get_key_service()
     try:
         return await service.refresh()
+    except TemplateUnchangedError:
+        # Upstream confirmed the cached key is current — serve it.
+        return await service.current()
     except RefreshRateLimitedError as exc:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,

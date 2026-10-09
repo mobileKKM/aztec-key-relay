@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     firebase_android_cert: str = "ANDROID_CERT"
     firebase_rc_sdk_version: str = "23.0.0"
     firebase_app_build: str = "APP_BUILD"
+    # Request-body context fields the RC SDK sends (values from the capture —
+    # the capture device: en-US locale, US country code, Warsaw timezone,
+    # Android 14 / API 34 emulator).
+    firebase_app_version: str = "1.6.10"
+    firebase_country_code: str = "US"
+    firebase_platform_version: str = "34"
+    firebase_time_zone: str = "Europe/Warsaw"
+    firebase_language_code: str = "en-US"
 
     # ── Service behaviour ────────────────────────────────────────────────────
     relay_api_token: str | None = None

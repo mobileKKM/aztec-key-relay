@@ -37,6 +37,18 @@ class FirebaseError(RuntimeError):
     """An upstream Firebase call failed (network, HTTP or bad payload)."""
 
 
+class TemplateUnchangedError(FirebaseError):
+    """The RC template is unchanged — real HTTP 304, or the observed
+    HTTP 200 + ``{"state": "NO_CHANGE"}`` revalidation response.
+
+    Not a failure: callers should keep serving their cached key (this mirrors
+    the official client's fetch → activate fallback to persisted values).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("RC template unchanged (304 / NO_CHANGE)")
+
+
 @dataclass(slots=True)
 class AuthToken:
     token: str
@@ -62,12 +74,20 @@ def _parse_duration(value: str) -> timedelta:
 
 
 class FirebaseClient:
-    """Stateful client owning the shared Firebase Installation."""
+    """Stateful client owning the shared Firebase Installation.
+
+    Upstream fidelity: the header set and JSON body replicate the official
+    client's requests byte-for-byte where captured (User-Agent/Accept absent,
+    `Accept-Encoding: gzip`, `Connection: Keep-Alive`, compact
+    `JSONObject.toString()`-style bodies with `/` escaped, ETag revalidation)
+    — a Python-identifiable fingerprint would otherwise stick out.
+    """
 
     def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
         self._settings = settings
         self._http = client
         self._installation: Installation | None = None
+        self._rc_etag: str | None = None
 
     @property
     def installation(self) -> Installation | None:
@@ -83,15 +103,18 @@ class FirebaseClient:
         alphabet = string.ascii_letters + string.digits + "-_"
         return secrets.choice("cdef") + "".join(secrets.choice(alphabet) for _ in range(21))
 
-    async def _post(self, url: str, *, headers: dict[str, str], json: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _post(self, url: str, *, headers: dict[str, str], content: bytes) -> tuple[dict[str, Any], httpx.Headers]:
         try:
-            response = await self._http.post(url, headers=headers, json=json)
+            response = await self._http.post(url, headers=headers, content=content)
         except httpx.HTTPError as exc:
             raise FirebaseError(f"network error calling {url}: {exc}") from exc
+        if response.status_code == 304:
+            # ETag revalidation hit — no body. Callers treat this as "unchanged".
+            return {}, response.headers
         if response.status_code != 200:
             raise FirebaseError(f"{url} returned HTTP {response.status_code}: {response.text[:200]}")
         try:
-            return response.json()
+            return response.json(), response.headers
         except ValueError as exc:
             raise FirebaseError(f"{url} returned non-JSON body") from exc
 
@@ -102,21 +125,71 @@ class FirebaseClient:
             "X-Android-Cert": self._settings.firebase_android_cert,
         }
 
+    @staticmethod
+    def _sdk_headers() -> dict[str, str]:
+        """FIS/RC SDK transport defaults: no User-Agent, no Accept header.
+
+        The captured official-app requests carry none of okhttp's usual
+        `User-Agent`/`Accept`; the SDKs strip them. httpx otherwise
+        advertises `python-httpx/…` — an instant fingerprint.
+        """
+        return {"User-Agent": "", "Accept": "", "Accept-Encoding": "gzip", "Connection": "Keep-Alive"}
+
+    @staticmethod
+    def _sdk_json_body(fields: dict[str, Any]) -> bytes:
+        """Serializes like Android's `JSONObject.toString()` — compact and with
+        `/` escaped (the capture shows `Europe\\/Warsaw`). httpx's `json=` uses
+        a space after separators (", ") — different bytes, so we build it ourselves.
+        """
+        import json
+
+        return json.dumps(fields, separators=(",", ":"), ensure_ascii=False).replace("/", "\\/").encode()
+
+    async def _fetch_rc(self, installation: Installation) -> tuple[dict[str, Any], httpx.Headers]:
+        headers = {
+            **self._sdk_headers(),
+            "X-Goog-Api-Key": self._settings.firebase_api_key,
+            "X-Android-Package": self._settings.firebase_android_package,
+            "X-Android-Cert": self._settings.firebase_android_cert,
+            "X-Google-GFE-Can-Retry": "yes",
+            "X-Goog-Firebase-Installations-Auth": installation.auth.token,
+            # No Content-Type — the captured official-app request has none.
+        }
+        if self._rc_etag:
+            headers["If-None-Match"] = self._rc_etag
+        return await self._post(
+            self._settings.remote_config_url,
+            headers=headers,
+            content=self._sdk_json_body(
+                {
+                    "appInstanceId": installation.fid,
+                    "appVersion": self._settings.firebase_app_version,
+                    "countryCode": self._settings.firebase_country_code,
+                    "analyticsUserProperties": {},
+                    "appId": self._settings.firebase_app_id,
+                    "platformVersion": self._settings.firebase_platform_version,
+                    "timeZone": self._settings.firebase_time_zone,
+                    "sdkVersion": self._settings.firebase_rc_sdk_version,
+                    "packageName": self._settings.firebase_android_package,
+                    "appInstanceIdToken": installation.auth.token,
+                    "languageCode": self._settings.firebase_language_code,
+                    "appBuild": self._settings.firebase_app_build,
+                }
+            ),
+        )
+
     async def _create_installation(self) -> Installation:
         assert self._installation is None
         fid = self._new_fid()
-        data = await self._post(
+        data, _ = await self._post(
             self._settings.installations_url,
             headers={
-                "X-Goog-Api-Key": self._settings.firebase_api_key,
                 "Content-Type": "application/json",
+                "X-Goog-Api-Key": self._settings.firebase_api_key,
                 **self._android_headers(),
+                **self._sdk_headers(),
             },
-            json={
-                "fid": fid,
-                "appId": self._settings.firebase_app_id,
-                "authVersion": "FIS_v2",
-            },
+            content=self._sdk_json_body({"fid": fid, "appId": self._settings.firebase_app_id, "authVersion": "FIS_v2"}),
         )
         if not data.get("fid") or not data.get("refreshToken"):
             raise FirebaseError(f"installations response missing fid/refreshToken: {sorted(data)}")
@@ -124,15 +197,18 @@ class FirebaseClient:
 
     async def _generate_auth_token(self, installation: Installation) -> AuthToken:
         url = f"{self._settings.installations_url}/{installation.fid}/authTokens:generate"
-        data = await self._post(
+        data, _ = await self._post(
             url,
             headers={
                 "Authorization": f"FIS_v2 {installation.refresh_token}",
-                "X-Goog-Api-Key": self._settings.firebase_api_key,
                 "Content-Type": "application/json",
+                "X-Goog-Api-Key": self._settings.firebase_api_key,
                 **self._android_headers(),
+                **self._sdk_headers(),
             },
-            json={},
+            # The endpoint rejects any body fields ("Unknown name …") — the
+            # official SDK sends an empty JSON object.
+            content=b"{}",
         )
         token = data.get("token")
         expires = data.get("expiresIn")
@@ -162,30 +238,16 @@ class FirebaseClient:
         """Fetches the RC template and returns the raw `aztecKey` value.
 
         Refreshes the installation/auth token if needed (retrying once with a
-        fresh installation when the FID was invalidated server-side).
+        fresh installation when the FID was invalidated server-side) and
+        revalidates with the cached ETag like the official client. On a 304
+        (template unchanged) raises [TemplateUnchangedError] — callers keep
+        their cached key, exactly like the official client's fallback.
         """
         for attempt in (0, 1):
             installation = await self.ensure_installation()
             assert installation.auth is not None
             try:
-                data = await self._post(
-                    self._settings.remote_config_url,
-                    headers={
-                        "X-Goog-Api-Key": self._settings.firebase_api_key,
-                        "X-Android-Package": self._settings.firebase_android_package,
-                        "X-Android-Cert": self._settings.firebase_android_cert,
-                        "X-Goog-Firebase-Installations-Auth": installation.auth.token,
-                        "X-Google-Signal-Key-Token": self._settings.firebase_api_key,
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                    },
-                    json={
-                        "appInstanceId": installation.fid,
-                        "appId": self._settings.firebase_app_id,
-                        "sdkVersion": self._settings.firebase_rc_sdk_version,
-                        "appBuild": self._settings.firebase_app_build,
-                    },
-                )
+                data, resp_headers = await self._fetch_rc(installation)
             except FirebaseError:
                 # A revoked FID (server prunes idle installations) manifests as
                 # auth failure — start over with a fresh installation once.
@@ -194,9 +256,15 @@ class FirebaseClient:
                     continue
                 raise
 
+            if etag := resp_headers.get("ETag"):
+                self._rc_etag = etag
+
             entries = data.get("entries")
             if not isinstance(entries, dict):
-                # NO_TEMPLATE / empty first-time response — treat as missing key.
+                # Revalidation hit — either a real HTTP 304 (empty body) or the
+                # observed HTTP 200 + {"state": "NO_CHANGE"} shape.
+                if not data or data.get("state") == "NO_CHANGE":
+                    raise TemplateUnchangedError
                 raise FirebaseError(f"RC fetch response has no entries (state={data.get('state')!r})")
             value = entries.get("aztecKey")
             if not isinstance(value, str) or not value.strip():
