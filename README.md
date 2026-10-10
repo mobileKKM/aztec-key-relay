@@ -80,6 +80,8 @@ Or with Docker:
 docker compose up -d --build
 ```
 
+The container joins the external `nginx_proxy` network and publishes **no ports** — your reverse proxy reaches it as `http://mkkm-aztec-key-relay:8000` by service name (create the network first if it doesn't exist yet: `docker network create nginx_proxy`).
+
 The `data/` directory holds `state.db` — mount it somewhere durable, or you get a new Firebase Installation on every redeploy.
 
 ## Tests
