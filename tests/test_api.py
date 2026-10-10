@@ -132,6 +132,59 @@ def test_health_endpoint(tmp_path) -> None:
         client.__exit__(None, None, None)
 
 
+def test_probe_requests_are_not_access_logged() -> None:
+    """Docker's healthcheck spams /health (and monitors /ready) — those
+    records must be dropped from the uvicorn.access logger; others kept.
+    (TestClient bypasses uvicorn, so we emit the records directly.)
+    """
+    import logging
+
+    from aztec_key_relay.main import _QuietHealthFilter
+
+    access = logging.getLogger("uvicorn.access")
+    access.addFilter(_QuietHealthFilter())
+    try:
+        captured: list[tuple] = []
+
+        class Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                if isinstance(record.args, tuple):
+                    captured.append(record.args)
+
+        access.addHandler(Capture())
+
+        def emit(method: str, path: str, status: int) -> None:
+            # uvicorn.access's effective level is WARNING under pytest (uvicorn
+            # never configures logging), so plain .info() is dropped before
+            # filters run. Build the record explicitly and hand it to the
+            # logger so the filter chain is exercised.
+            record = access.makeRecord(
+                access.name,
+                logging.INFO,
+                __file__,
+                1,
+                '%s - "%s %s HTTP/1.1" %d %s',
+                ("1.2.3.4:1", method, path, status, "OK"),
+                None,
+            )
+            access.handle(record)
+
+        emit("GET", "/health", 200)
+        emit("GET", "/ready", 200)
+        emit("GET", "/api/v1/aztec-key", 200)
+        emit("POST", "/api/v1/aztec-key/refresh", 429)
+
+        paths = [args[2] for args in captured]
+        assert "/health" not in paths
+        assert "/ready" not in paths
+        assert paths == ["/api/v1/aztec-key", "/api/v1/aztec-key/refresh"]
+    finally:
+        # main.py installs one filter at import; drop only the duplicate we added
+        filters = [f for f in access.filters if isinstance(f, _QuietHealthFilter)]
+        for f in filters[1:]:
+            access.removeFilter(f)
+
+
 def test_get_cache_control_headers(tmp_path) -> None:
     """Open mode: public + max-age — intermediary caches may serve repeats."""
     client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))

@@ -35,6 +35,19 @@ logger = logging.getLogger("aztec_key_relay")
 DAILY_JITTER_SECONDS = 15 * 60
 
 
+class _QuietHealthFilter(logging.Filter):
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 3:
+            return True
+        path = args[2]
+        return not (isinstance(path, str) and path.startswith(("/health", "/ready")))
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietHealthFilter())
+
+
 @dataclass
 class AppState:
     key_service: KeyService | None = None
