@@ -43,17 +43,8 @@ def require_token(authorization: Annotated[str | None, Header()] = None) -> None
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
 
 
-def _get_cache_control() -> str:
-    """`Cache-Control` for cacheable key responses.
-
-    `private` when bearer auth is enabled (a shared cache must never store
-    token-authorized responses), `public` otherwise so an intermediary can
-    serve repeat GETs without hitting the relay.
-    """
-    from ..main import app_state
-
-    visibility = "private" if app_state.api_token else "public"
-    return f"{visibility}, max-age={app_state.cache_max_age}"
+def _etag(envelope: KeyEnvelope) -> str:
+    return f'"{envelope.fingerprint_sha256}"'
 
 
 def _etag_matches(if_none_match: str | None, etag: str) -> bool:
@@ -80,7 +71,7 @@ async def get_aztec_key(
         # Don't let a cache store the 503 — it would mask a fast recovery.
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc), headers=NO_STORE) from exc
 
-    headers = {"Cache-Control": _get_cache_control(), "ETag": f'"{envelope.fingerprint_sha256}"'}
+    headers = {"ETag": _etag(envelope)}
     if _etag_matches(if_none_match, headers["ETag"]):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     response.headers.update(headers)
@@ -97,7 +88,9 @@ async def refresh_aztec_key(response: Response) -> KeyEnvelope:
     response.headers.update(NO_STORE)
     service = get_key_service()
     try:
-        return await service.refresh()
+        envelope = await service.refresh()
+        response.headers["ETag"] = _etag(envelope)
+        return envelope
     except RefreshRateLimitedError as exc:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,

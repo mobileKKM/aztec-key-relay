@@ -1,6 +1,6 @@
 [project]
 name = "aztec-key-relay"
-version = "0.2.0"
+version = "0.3.0"
 description = "Small FastAPI service relaying the mKKM aztecKey RSA public key from Firebase Remote Config"
 readme = "README.md"
 license-files = ["LICENSE"]

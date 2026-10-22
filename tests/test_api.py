@@ -148,24 +148,13 @@ def test_health_endpoint(tmp_path) -> None:
         client.__exit__(None, None, None)
 
 
-def test_get_cache_control_headers(tmp_path) -> None:
-    """Open mode: public + max-age — intermediary caches may serve repeats."""
+def test_get_has_etag_and_no_max_age(tmp_path) -> None:
     client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
     try:
         response = client.get("/api/v1/aztec-key")
         assert response.status_code == 200
-        assert response.headers["Cache-Control"] == "public, max-age=300"
-    finally:
-        client.__exit__(None, None, None)
-
-
-def test_get_cache_control_private_when_auth_enabled(tmp_path) -> None:
-    """Bearer-auth mode: private — shared caches must not store token responses."""
-    client, _ = build_app([REAL_AZTEC_KEY_PEM], api_token="sekrit", db_dir=str(tmp_path))
-    try:
-        response = client.get("/api/v1/aztec-key", headers={"Authorization": "Bearer sekrit"})
-        assert response.status_code == 200
-        assert response.headers["Cache-Control"] == "private, max-age=300"
+        assert "ETag" in response.headers
+        assert "Cache-Control" not in response.headers
     finally:
         client.__exit__(None, None, None)
 
@@ -176,6 +165,7 @@ def test_refresh_responses_are_never_cacheable(tmp_path) -> None:
         ok = client.post("/api/v1/aztec-key/refresh")
         assert ok.status_code == 200
         assert ok.headers["Cache-Control"] == "no-store"
+        assert ok.headers["ETag"] == client.get("/api/v1/aztec-key").headers["ETag"]
 
         fake.rc_failures_remaining = 99
         failed = client.post("/api/v1/aztec-key/refresh")

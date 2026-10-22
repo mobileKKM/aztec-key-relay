@@ -25,8 +25,8 @@ The relay keeps no record of its own users either: there is **no access log** (u
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/v1/aztec-key` | Cached key. Never triggers a fetch. `503` if none was ever fetched. `ETag` is the quoted fingerprint; send it back as `If-None-Match` to get a bodyless `304` until the key rotates. `Cache-Control: public, max-age=300` (`private` when `RELAY_API_TOKEN` is set; configurable via `RELAY_CACHE_MAX_AGE`). |
-| `POST /api/v1/aztec-key/refresh` | Upstream fetch (single-flight). Inside the rate window: the just-checked key (`200`), or `429` + `Retry-After` if that check failed. `502` if upstream fails (old key stays cached, marked stale). Never cacheable (`no-store`). |
+| `GET /api/v1/aztec-key` | Cached key. Never triggers a fetch. `503` if none was ever fetched. `ETag` is the quoted fingerprint; send it back as `If-None-Match` to get a bodyless `304` until the key rotates. |
+| `POST /api/v1/aztec-key/refresh` | Upstream fetch (single-flight). Inside the rate window: the just-checked key (`200`), or `429` + `Retry-After` if that check failed. `502` if upstream fails (old key stays cached, marked stale). Never cacheable (`no-store`), but carries the same `ETag` as the GET. |
 | `GET /health` | Liveness. |
 | `GET /ready` | Readiness — `200` + `ready: true` once a key is cached, `503` before. |
 
@@ -69,7 +69,6 @@ Copy `.env.example` to `.env`. Everything has working defaults; the interesting 
 | `RELAY_DAILY_REFRESH_HOUR` | `4` | UTC hour for the daily refresh. |
 | `RELAY_DB_PATH` | `data/state.db` | SQLite path (key history + installation identity). |
 | `RELAY_KEY_HISTORY` | `10` | Historical keys to keep. |
-| `RELAY_CACHE_MAX_AGE` | `300` | `Cache-Control` max-age (seconds) for `GET /api/v1/aztec-key`. |
 
 ## Run
 

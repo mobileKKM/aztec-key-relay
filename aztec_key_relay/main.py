@@ -52,7 +52,6 @@ class AppState:
     store: Store | None = None
     http_client: httpx.AsyncClient | None = None
     api_token: str | None = None
-    cache_max_age: int = 300
     background: set[asyncio.Task] = field(default_factory=set)
     transport: httpx.AsyncBaseTransport | None = None
 
@@ -104,7 +103,6 @@ async def _refresh_loop(service: KeyService, hour_utc: int) -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     app_state.api_token = settings.relay_api_token
-    app_state.cache_max_age = settings.relay_cache_max_age
     # No default headers: each FirebaseClient call sets the exact SDK header
     # set (empty UA, `Accept-Encoding: gzip`, `Connection: Keep-Alive`) so we
     # never advertise python-httpx upstream.
@@ -150,7 +148,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app_state.store = None
     app_state.http_client = None
     app_state.api_token = None
-    app_state.cache_max_age = 300
     app_state.transport = None
 
 

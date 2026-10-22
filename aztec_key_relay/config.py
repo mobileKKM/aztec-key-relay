@@ -37,9 +37,6 @@ class Settings(BaseSettings):
     relay_daily_refresh_hour: int = Field(default=4, ge=0, le=23)
     relay_db_path: str = "data/state.db"
     relay_key_history: int = Field(default=10, ge=1)
-    # Cache-Control max-age for GET /api/v1/aztec-key (seconds). The key rotates
-    # rarely and clients can force-refresh, so a few minutes is plenty fresh.
-    relay_cache_max_age: int = Field(default=300, ge=0)
 
     @field_validator("relay_api_token")
     @classmethod
