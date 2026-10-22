@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import httpx
 import pytest
 from conftest import REAL_AZTEC_KEY_PEM, FakeFirebase, generate_pkcs1_pem
@@ -67,16 +69,66 @@ async def test_restores_persisted_installation() -> None:
         assert client.installation.fid == "abc123"
 
 
-async def test_rc_http_error_raises_firebase_error() -> None:
+async def test_rc_server_error_keeps_installation() -> None:
+    """A 5xx must not throw away the shared installation (privacy goal)."""
     fake = FakeFirebase([REAL_AZTEC_KEY_PEM])
-    fake.fail_next_rc = True
     async with httpx.AsyncClient(transport=fake.transport) as http:
         client = FirebaseClient(Settings(), http)
-        # First attempt 500s; the retry-with-fresh-installation also 500s…
-        # FakeFirebase.fail_next_rc only fails once, so second succeeds.
-        pem = await client.fetch_aztec_key()
-        assert pem == REAL_AZTEC_KEY_PEM
-        assert fake.installations_created == 2  # one per attempt
+        await client.fetch_aztec_key()
+        fid = client.installation.fid
+
+        fake.fail_next_rc = True
+        with pytest.raises(FirebaseError) as info:
+            await client.fetch_aztec_key()
+        assert info.value.status_code == 500
+
+        assert await client.fetch_aztec_key() == REAL_AZTEC_KEY_PEM
+        assert fake.installations_created == 1
+        assert client.installation.fid == fid
+
+
+async def test_network_error_keeps_installation() -> None:
+    fake = FakeFirebase([REAL_AZTEC_KEY_PEM])
+    async with httpx.AsyncClient(transport=fake.transport) as http:
+        client = FirebaseClient(Settings(), http)
+        await client.fetch_aztec_key()
+        fake.rc_network_error_next = True
+        with pytest.raises(FirebaseError):
+            await client.fetch_aztec_key()
+        assert fake.installations_created == 1
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+async def test_revoked_installation_is_replaced_once(status: int) -> None:
+    fake = FakeFirebase([REAL_AZTEC_KEY_PEM])
+    fake.auth_token_statuses = [status]
+    async with httpx.AsyncClient(transport=fake.transport) as http:
+        client = FirebaseClient(Settings(), http)
+        client.restore_installation("old-fid", "old-refresh-token")
+        assert await client.fetch_aztec_key() == REAL_AZTEC_KEY_PEM
+        assert fake.installations_created == 1
+        assert client.installation.fid != "old-fid"
+
+
+async def test_restored_auth_token_is_reused() -> None:
+    fake = FakeFirebase([REAL_AZTEC_KEY_PEM])
+    async with httpx.AsyncClient(transport=fake.transport) as http:
+        client = FirebaseClient(Settings(), http)
+        client.restore_installation("abc123", "rt", "saved-token", datetime.now(UTC) + timedelta(days=3))
+        await client.fetch_aztec_key()
+        assert fake.auth_tokens_generated == 0
+        assert fake.rc_requests[0].headers["X-Goog-Firebase-Installations-Auth"] == "saved-token"
+
+
+async def test_etag_is_only_sent_after_commit() -> None:
+    fake = FakeFirebase([REAL_AZTEC_KEY_PEM])
+    async with httpx.AsyncClient(transport=fake.transport) as http:
+        client = FirebaseClient(Settings(), http)
+        await client.fetch_aztec_key()
+        await client.fetch_aztec_key()  # not committed → no revalidation
+        client.commit_etag()
+        await client.fetch_aztec_key()
+        assert [r.headers.get("If-None-Match") for r in fake.rc_requests] == [None, None, "etag-1"]
 
 
 async def test_persistent_rc_error_raises() -> None:

@@ -62,16 +62,26 @@ class FakeFirebase:
         self.fail_next_rc = False
         self.rc_failures_remaining = 0
         self.etag_304_next = False
+        self.rc_network_error_next = False
+        # HTTP statuses for the next authTokens:generate calls (FIFO).
+        self.auth_token_statuses: list[int] = []
+        self.rc_requests: list[httpx.Request] = []
 
         async def handler(request: httpx.Request) -> httpx.Response:
             url = request.url
             if url.host == "firebaseinstallations.googleapis.com" and url.path.endswith("/authTokens:generate"):
+                if self.auth_token_statuses:
+                    return httpx.Response(self.auth_token_statuses.pop(0), text="installation gone")
                 self.auth_tokens_generated += 1
                 return httpx.Response(200, json={"token": "tok-1", "expiresIn": "604800s"})
             if url.host == "firebaseinstallations.googleapis.com":
                 self.installations_created += 1
                 return httpx.Response(200, json={"fid": "f" * 22, "refreshToken": "rt-1", "expiresIn": "1w"})
             if url.host == "firebaseremoteconfig.googleapis.com":
+                self.rc_requests.append(request)
+                if self.rc_network_error_next:
+                    self.rc_network_error_next = False
+                    raise httpx.ConnectError("connection refused", request=request)
                 if self.fail_next_rc or self.rc_failures_remaining > 0:
                     self.fail_next_rc = False
                     if self.rc_failures_remaining > 0:

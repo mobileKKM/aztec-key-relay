@@ -91,6 +91,7 @@ async def test_cache_miss_sends_no_if_none_match() -> None:
     async with make_client(captured, etag=ETAG) as http:
         client = FirebaseClient(Settings(), http)
         await client.fetch_aztec_key()
+        client.commit_etag()  # the service commits after validating the key
         await client.fetch_aztec_key()
 
     first, second = [r for r in captured if "firebaseremoteconfig" in r.url.host]
@@ -139,6 +140,7 @@ async def test_etag_revalidation_sent_on_second_fetch() -> None:
     async with make_client(captured, etag=ETAG) as http:
         client = FirebaseClient(Settings(), http)
         await client.fetch_aztec_key()
+        client.commit_etag()  # the service commits after validating the key
         await client.fetch_aztec_key()
 
     first, second = [r for r in captured if "firebaseremoteconfig" in r.url.host]
@@ -194,6 +196,7 @@ async def test_installation_requests_headers() -> None:
     assert headers["X-Android-Package"] == s.firebase_android_package
     assert headers["X-Android-Cert"] == s.firebase_android_cert
     assert headers["Accept-Encoding"] == "gzip"
+    assert headers["Accept"] == "application/json", "httpx default is '*/*'"
     body = json.loads(install.content)
     assert list(body.keys()) == ["fid", "appId", "authVersion"]
     assert body["fid"][0] in "cdef"

@@ -19,6 +19,8 @@ Endpoint shapes (observed on the wire, see mobile_kkm's ekp_crypto README):
 
 from __future__ import annotations
 
+import json
+import re
 import secrets
 import string
 from dataclasses import dataclass
@@ -29,12 +31,21 @@ import httpx
 
 from .config import Settings
 
-INSTALLATIONS_TIMEOUT = httpx.Timeout(10.0, read=20.0)
-REMOTE_CONFIG_TIMEOUT = httpx.Timeout(10.0, read=20.0)
+# authTokens:generate statuses meaning "this FID is gone" — the Firebase SDK
+# deletes the installation and registers a new one on exactly these.
+_INSTALLATION_INVALID_STATUSES = frozenset({401, 403, 404})
 
 
 class FirebaseError(RuntimeError):
     """An upstream Firebase call failed (network, HTTP or bad payload)."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class InstallationInvalidError(FirebaseError):
+    """The installation was revoked or never existed server-side."""
 
 
 class TemplateUnchangedError(FirebaseError):
@@ -64,8 +75,6 @@ class Installation:
 
 def _parse_duration(value: str) -> timedelta:
     """Parses Go-style durations: ``604800s``, ``1w``, ``0.5h`` …"""
-    import re
-
     match = re.fullmatch(r"(?P<n>[\d.]+)(?P<u>[smhdw])", value.strip())
     if not match:
         raise ValueError(f"unparseable duration: {value!r}")
@@ -87,15 +96,40 @@ class FirebaseClient:
         self._settings = settings
         self._http = client
         self._installation: Installation | None = None
+        # The ETag we revalidate with, and the one from the last fetch that
+        # the caller has not accepted yet (see commit_etag).
         self._rc_etag: str | None = None
+        self._pending_etag: str | None = None
 
     @property
     def installation(self) -> Installation | None:
         return self._installation
 
-    def restore_installation(self, fid: str, refresh_token: str) -> None:
+    def restore_installation(
+        self,
+        fid: str,
+        refresh_token: str,
+        auth_token: str | None = None,
+        auth_expires_at: datetime | None = None,
+    ) -> None:
         """Adopts a persisted installation (no network traffic)."""
-        self._installation = Installation(fid=fid, refresh_token=refresh_token)
+        auth = AuthToken(auth_token, auth_expires_at) if auth_token and auth_expires_at else None
+        self._installation = Installation(fid=fid, refresh_token=refresh_token, auth=auth)
+
+    def commit_etag(self) -> None:
+        """Revalidate future fetches against the last fetched template.
+
+        Call only once the fetched key was validated and stored — otherwise
+        a rejected key would come back as "304 unchanged" next time.
+        """
+        if self._pending_etag:
+            self._rc_etag = self._pending_etag
+        self._pending_etag = None
+
+    def clear_etag(self) -> None:
+        """Forget the ETag so the next fetch returns the full template."""
+        self._rc_etag = None
+        self._pending_etag = None
 
     def _new_fid(self) -> str:
         # FIDs must match ^[cdef][\w-]{21}$ — the first char encodes a 2-bit
@@ -107,12 +141,14 @@ class FirebaseClient:
         try:
             response = await self._http.post(url, headers=headers, content=content)
         except httpx.HTTPError as exc:
-            raise FirebaseError(f"network error calling {url}: {exc}") from exc
+            raise FirebaseError(f"network error calling {url}: {exc!r}") from exc
         if response.status_code == 304:
             # ETag revalidation hit — no body. Callers treat this as "unchanged".
             return {}, response.headers
         if response.status_code != 200:
-            raise FirebaseError(f"{url} returned HTTP {response.status_code}: {response.text[:200]}")
+            raise FirebaseError(
+                f"{url} returned HTTP {response.status_code}: {response.text[:200]}", status_code=response.status_code
+            )
         try:
             return response.json(), response.headers
         except ValueError as exc:
@@ -142,8 +178,6 @@ class FirebaseClient:
         `/` escaped (the capture shows `Europe\\/Warsaw`). httpx's `json=` uses
         a space after separators (", ") — different bytes, so we build it ourselves.
         """
-        import json
-
         return json.dumps(fields, separators=(",", ":"), ensure_ascii=False).replace("/", "\\/").encode()
 
     async def _fetch_rc(self, installation: Installation) -> tuple[dict[str, Any], httpx.Headers]:
@@ -191,6 +225,9 @@ class FirebaseClient:
             self._settings.installations_url,
             headers={
                 "Content-Type": "application/json",
+                # Set explicitly so httpx's default `Accept: */*` never goes out;
+                # the FIS Android SDK sends application/json.
+                "Accept": "application/json",
                 "X-Goog-Api-Key": self._settings.firebase_api_key,
                 **self._android_headers(),
                 **self._sdk_headers(self._settings.firebase_user_agent),
@@ -203,19 +240,27 @@ class FirebaseClient:
 
     async def _generate_auth_token(self, installation: Installation) -> AuthToken:
         url = f"{self._settings.installations_url}/{installation.fid}/authTokens:generate"
-        data, _ = await self._post(
-            url,
-            headers={
-                "Authorization": f"FIS_v2 {installation.refresh_token}",
-                "Content-Type": "application/json",
-                "X-Goog-Api-Key": self._settings.firebase_api_key,
-                **self._android_headers(),
-                **self._sdk_headers(self._settings.firebase_user_agent),
-            },
-            # The endpoint rejects any body fields ("Unknown name …") — the
-            # official SDK sends an empty JSON object.
-            content=b"{}",
-        )
+        try:
+            data, _ = await self._post(
+                url,
+                headers={
+                    "Authorization": f"FIS_v2 {installation.refresh_token}",
+                    "Content-Type": "application/json",
+                    # Set explicitly so httpx's default `Accept: */*` never goes out;
+                    # the FIS Android SDK sends application/json.
+                    "Accept": "application/json",
+                    "X-Goog-Api-Key": self._settings.firebase_api_key,
+                    **self._android_headers(),
+                    **self._sdk_headers(self._settings.firebase_user_agent),
+                },
+                # The endpoint rejects any body fields ("Unknown name …") — the
+                # official SDK sends an empty JSON object.
+                content=b"{}",
+            )
+        except FirebaseError as exc:
+            if exc.status_code in _INSTALLATION_INVALID_STATUSES:
+                raise InstallationInvalidError(str(exc), status_code=exc.status_code) from exc
+            raise
         token = data.get("token")
         expires = data.get("expiresIn")
         if not token or not expires:
@@ -243,28 +288,33 @@ class FirebaseClient:
     async def fetch_aztec_key(self) -> str:
         """Fetches the RC template and returns the raw `aztecKey` value.
 
-        Refreshes the installation/auth token if needed (retrying once with a
-        fresh installation when the FID was invalidated server-side) and
-        revalidates with the cached ETag like the official client. On a 304
-        (template unchanged) raises [TemplateUnchangedError] — callers keep
-        their cached key, exactly like the official client's fallback.
+        Refreshes the auth token if needed and revalidates with the committed
+        ETag like the official client. Only a revoked/unknown installation
+        (401/403/404 from authTokens:generate) is replaced by a fresh one —
+        network errors and 5xx keep the shared installation, so a flaky
+        upstream never multiplies our footprint. An RC 401/403 regenerates
+        the auth token once.
+
+        On a 304 (template unchanged) raises [TemplateUnchangedError] —
+        callers keep their cached key, like the official client. After a
+        successful return, the new ETag is pending until [commit_etag].
         """
+        self._pending_etag = None
         for attempt in (0, 1):
             try:
                 installation = await self.ensure_installation()
-                data, resp_headers = await self._fetch_rc(installation)
-            except FirebaseError:
-                # A revoked/inconsistent FID (server prunes idle installations;
-                # a fresh FID can 404 on token generation) — start over with a
-                # fresh installation once.
+            except InstallationInvalidError:
                 if attempt == 0:
                     self._installation = None
                     continue
                 raise
-            assert installation.auth is not None
-
-            if etag := resp_headers.get("ETag"):
-                self._rc_etag = etag
+            try:
+                data, resp_headers = await self._fetch_rc(installation)
+            except FirebaseError as exc:
+                if attempt == 0 and exc.status_code in (401, 403):
+                    installation.auth = None  # stale token — mint a new one
+                    continue
+                raise
 
             entries = data.get("entries")
             if not isinstance(entries, dict):
@@ -276,6 +326,7 @@ class FirebaseClient:
             value = entries.get("aztecKey")
             if not isinstance(value, str) or not value.strip():
                 raise FirebaseError(f"RC entries missing aztecKey: {sorted(entries)}")
+            self._pending_etag = resp_headers.get("ETag")
             return value
 
         raise FirebaseError("unreachable")
