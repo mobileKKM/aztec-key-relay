@@ -3,14 +3,13 @@ services:
     build: .
     container_name: mkkm-aztec-key-relay
     restart: unless-stopped
+    # Run unprivileged, as the host owner of ./data (SQLite must write there).
+    # Set RELAY_UID/RELAY_GID in .env to match `id -u` / `id -g` of that owner.
+    user: "${RELAY_UID:-1000}:${RELAY_GID:-1000}"
     env_file:
       - .env
     environment:
       RELAY_DB_PATH: /app/data/state.db
-      # Trust X-Forwarded-For from the proxy network so logs show real client
-      # IPs. "*" is safe here: the only reachable peers are the proxy and
-      # other containers on nginx_proxy (no published ports).
-      FORWARDED_ALLOW_IPS: "*"
     volumes:
       - ./data:/app/data
     networks:

@@ -30,13 +30,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
 
 # state.db (cached key + Firebase installation) lives here — mount a volume.
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data && chown 1000:1000 /app/data
 VOLUME /app/data
-
+USER 1000:1000
 EXPOSE 8000
 
-# --proxy-headers: trust X-Forwarded-For/Proto from the reverse proxy so
-# access logs show real client IPs. FORWARDED_ALLOW_IPS (comma-separated;
-# nginx container IPs/subnet, or "*" for the whole proxy network) controls
-# which peers are trusted — pass it via compose environment.
-CMD ["uvicorn", "aztec_key_relay.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+# --no-access-log: the relay keeps no record of which client asked for the
+# key, or when (privacy is the point of this service). App logs still cover
+# refreshes and errors. --no-server-header: don't advertise uvicorn.
+CMD ["uvicorn", "aztec_key_relay.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--no-server-header"]
