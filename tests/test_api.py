@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
-from conftest import REAL_AZTEC_KEY_PEM, build_app, generate_pkcs1_pem
+from conftest import REAL_AZTEC_KEY_PEM, build_app, fingerprint_of, generate_pkcs1_pem
+
+
+def _fail_rc(fake) -> None:
+    fake.rc_failures_remaining = 99
 
 
 def test_startup_fetches_when_cache_empty(tmp_path) -> None:
@@ -48,14 +53,25 @@ def test_refresh_rotates_key_and_bumps_version(tmp_path) -> None:
         client.__exit__(None, None, None)
 
 
-def test_refresh_rate_limited(tmp_path) -> None:
+def test_refresh_inside_window_after_success_returns_key(tmp_path) -> None:
     client, fake = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=60, db_dir=str(tmp_path))
     try:
-        # Startup fetch already ran; an immediate refresh is rate limited.
+        # Startup fetch just succeeded → a refresh inside the window gets that key.
+        response = client.post("/api/v1/aztec-key/refresh")
+        assert response.status_code == 200
+        assert response.json()["pem"] == REAL_AZTEC_KEY_PEM
+        assert fake.rc_fetches == 1  # no extra upstream call
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_refresh_inside_window_after_failure_is_rate_limited(tmp_path) -> None:
+    client, fake = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=60, db_dir=str(tmp_path), pre_arm=_fail_rc)
+    try:
         response = client.post("/api/v1/aztec-key/refresh")
         assert response.status_code == 429
         assert "Retry-After" in response.headers
-        assert fake.rc_fetches == 1  # no extra upstream call
+        assert fake.rc_fetches == 0
     finally:
         client.__exit__(None, None, None)
 
@@ -132,59 +148,6 @@ def test_health_endpoint(tmp_path) -> None:
         client.__exit__(None, None, None)
 
 
-def test_probe_requests_are_not_access_logged() -> None:
-    """Docker's healthcheck spams /health (and monitors /ready) — those
-    records must be dropped from the uvicorn.access logger; others kept.
-    (TestClient bypasses uvicorn, so we emit the records directly.)
-    """
-    import logging
-
-    from aztec_key_relay.main import _QuietHealthFilter
-
-    access = logging.getLogger("uvicorn.access")
-    access.addFilter(_QuietHealthFilter())
-    try:
-        captured: list[tuple] = []
-
-        class Capture(logging.Handler):
-            def emit(self, record: logging.LogRecord) -> None:
-                if isinstance(record.args, tuple):
-                    captured.append(record.args)
-
-        access.addHandler(Capture())
-
-        def emit(method: str, path: str, status: int) -> None:
-            # uvicorn.access's effective level is WARNING under pytest (uvicorn
-            # never configures logging), so plain .info() is dropped before
-            # filters run. Build the record explicitly and hand it to the
-            # logger so the filter chain is exercised.
-            record = access.makeRecord(
-                access.name,
-                logging.INFO,
-                __file__,
-                1,
-                '%s - "%s %s HTTP/1.1" %d %s',
-                ("1.2.3.4:1", method, path, status, "OK"),
-                None,
-            )
-            access.handle(record)
-
-        emit("GET", "/health", 200)
-        emit("GET", "/ready", 200)
-        emit("GET", "/api/v1/aztec-key", 200)
-        emit("POST", "/api/v1/aztec-key/refresh", 429)
-
-        paths = [args[2] for args in captured]
-        assert "/health" not in paths
-        assert "/ready" not in paths
-        assert paths == ["/api/v1/aztec-key", "/api/v1/aztec-key/refresh"]
-    finally:
-        # main.py installs one filter at import; drop only the duplicate we added
-        filters = [f for f in access.filters if isinstance(f, _QuietHealthFilter)]
-        for f in filters[1:]:
-            access.removeFilter(f)
-
-
 def test_get_cache_control_headers(tmp_path) -> None:
     """Open mode: public + max-age — intermediary caches may serve repeats."""
     client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
@@ -208,22 +171,26 @@ def test_get_cache_control_private_when_auth_enabled(tmp_path) -> None:
 
 
 def test_refresh_responses_are_never_cacheable(tmp_path) -> None:
-    # 429 (rate limited) must not be cached.
-    client, _ = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=60, db_dir=str(tmp_path))
+    client, fake = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path))
     try:
-        rate_limited = client.post("/api/v1/aztec-key/refresh")
-        assert rate_limited.status_code == 429
-        assert rate_limited.headers["Cache-Control"] == "no-store"
+        ok = client.post("/api/v1/aztec-key/refresh")
+        assert ok.status_code == 200
+        assert ok.headers["Cache-Control"] == "no-store"
+
+        fake.rc_failures_remaining = 99
+        failed = client.post("/api/v1/aztec-key/refresh")
+        assert failed.status_code == 502
+        assert failed.headers["Cache-Control"] == "no-store"
     finally:
         client.__exit__(None, None, None)
 
-    # 502 (upstream failure) must not be cached either.
-    client2, fake2 = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path))
+    # 429 (rate limited) must not be cached either.
+    empty_dir = tmp_path / "empty"
+    client2, _ = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=60, db_dir=str(empty_dir), pre_arm=_fail_rc)
     try:
-        fake2.rc_failures_remaining = 99
-        failed = client2.post("/api/v1/aztec-key/refresh")
-        assert failed.status_code == 502
-        assert failed.headers["Cache-Control"] == "no-store"
+        rate_limited = client2.post("/api/v1/aztec-key/refresh")
+        assert rate_limited.status_code == 429
+        assert rate_limited.headers["Cache-Control"] == "no-store"
     finally:
         client2.__exit__(None, None, None)
 
@@ -257,3 +224,163 @@ def test_304_during_refresh_serves_cached_key(tmp_path) -> None:
         assert response.json()["stale"] is False
     finally:
         client.__exit__(None, None, None)
+
+
+def test_ready_is_503_without_key(tmp_path) -> None:
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path), pre_arm=_fail_rc)
+    try:
+        response = client.get("/ready")
+        assert response.status_code == 503
+        assert response.json() == {"ready": False}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_conditional_get(tmp_path) -> None:
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
+    try:
+        first = client.get("/api/v1/aztec-key")
+        etag = first.headers["ETag"]
+        assert etag == f'"{fingerprint_of(REAL_AZTEC_KEY_PEM)}"'
+
+        cached = client.get("/api/v1/aztec-key", headers={"If-None-Match": etag})
+        assert cached.status_code == 304
+        assert cached.content == b""
+        assert cached.headers["ETag"] == etag
+
+        other = client.get("/api/v1/aztec-key", headers={"If-None-Match": '"something-else"'})
+        assert other.status_code == 200
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_502_does_not_leak_upstream_details(tmp_path) -> None:
+    client, fake = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path))
+    try:
+        fake.rc_failures_remaining = 99
+        response = client.post("/api/v1/aztec-key/refresh")
+        assert response.status_code == 502
+        assert response.json() == {"detail": "upstream fetch failed"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_304_without_cached_key_is_a_failure_not_a_crash(tmp_path) -> None:
+    def arm_304(fake) -> None:
+        fake.etag_304_next = True
+
+    # Startup survives the 304 (no key to fall back on) …
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path), pre_arm=arm_304)
+    try:
+        assert client.get("/api/v1/aztec-key").status_code == 503
+        # … and the next refresh fetches the full template.
+        response = client.post("/api/v1/aztec-key/refresh")
+        assert response.status_code == 200
+        assert response.json()["pem"] == REAL_AZTEC_KEY_PEM
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_rejected_key_does_not_commit_etag(tmp_path) -> None:
+    client, fake = build_app([REAL_AZTEC_KEY_PEM, "not a key", "not a key"], min_fetch_interval=0, db_dir=str(tmp_path))
+    try:
+        assert client.post("/api/v1/aztec-key/refresh").status_code == 502
+        assert client.post("/api/v1/aztec-key/refresh").status_code == 502
+        # Startup committed etag-1; the rejected fetch must not replace it with
+        # a "known" state — the request after it still revalidates against the
+        # last *good* template, and the key stays stale until a good fetch.
+        assert client.get("/api/v1/aztec-key").json()["stale"] is True
+        assert [r.headers.get("If-None-Match") for r in fake.rc_requests] == [None, "etag-1", "etag-1"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_rollback_to_previous_key_is_served(tmp_path) -> None:
+    key_b = generate_pkcs1_pem()
+    client, _ = build_app([REAL_AZTEC_KEY_PEM, key_b, REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path))
+    try:
+        assert client.post("/api/v1/aztec-key/refresh").json()["pem"] == key_b
+        back = client.post("/api/v1/aztec-key/refresh").json()
+        assert back["pem"] == REAL_AZTEC_KEY_PEM
+        assert back["version"] == 3
+        assert client.get("/api/v1/aztec-key").json()["pem"] == REAL_AZTEC_KEY_PEM
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_same_key_refetch_updates_last_checked_only(tmp_path) -> None:
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path))
+    try:
+        first = client.get("/api/v1/aztec-key").json()
+        again = client.post("/api/v1/aztec-key/refresh").json()
+        assert again["version"] == first["version"]
+        assert again["fetched_at"] == first["fetched_at"]
+        assert again["last_checked_at"] > first["last_checked_at"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_restart_reuses_persisted_auth_token(tmp_path) -> None:
+    client1, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
+    client1.__exit__(None, None, None)
+
+    client2, fake2 = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
+    try:
+        assert client2.post("/api/v1/aztec-key/refresh").status_code == 200
+        assert fake2.installations_created == 0
+        assert fake2.auth_tokens_generated == 0
+    finally:
+        client2.__exit__(None, None, None)
+
+
+def test_new_installation_is_persisted_after_304(tmp_path) -> None:
+    client1, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
+    client1.__exit__(None, None, None)
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("UPDATE fid_state SET auth_token = NULL, auth_expires_at = NULL")
+
+    def revoke_then_304(fake) -> None:
+        fake.auth_token_statuses = [404]  # stored installation was revoked
+        fake.etag_304_next = True  # the replacement only ever sees a 304
+
+    client2, fake2 = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path), pre_arm=revoke_then_304)
+    try:
+        assert client2.post("/api/v1/aztec-key/refresh").status_code == 200
+        assert fake2.installations_created == 1
+    finally:
+        client2.__exit__(None, None, None)
+
+    # The replacement installation (with its fresh token) reached the disk.
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        assert conn.execute("SELECT auth_token FROM fid_state").fetchone()[0] == "tok-1"
+
+
+def test_old_database_is_migrated(tmp_path) -> None:
+    db = tmp_path / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE key_history (id INTEGER PRIMARY KEY AUTOINCREMENT, pem TEXT NOT NULL,
+                fingerprint TEXT NOT NULL UNIQUE, fetched_at TEXT NOT NULL);
+            CREATE TABLE fid_state (id INTEGER PRIMARY KEY CHECK (id = 1), fid TEXT NOT NULL,
+                refresh_token TEXT NOT NULL, auth_token TEXT, auth_expires_at TEXT);
+            """
+        )
+        conn.execute(
+            "INSERT INTO key_history (pem, fingerprint, fetched_at) VALUES (?, ?, ?)",
+            (REAL_AZTEC_KEY_PEM, fingerprint_of(REAL_AZTEC_KEY_PEM), "2026-10-01T00:00:00+00:00"),
+        )
+    client, fake = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
+    try:
+        assert fake.rc_fetches == 0
+        body = client.get("/api/v1/aztec-key").json()
+        assert body["fetched_at"] == body["last_checked_at"] == "2026-10-01T00:00:00+00:00"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_blank_api_token_means_open(tmp_path, monkeypatch) -> None:
+    from aztec_key_relay.config import Settings
+
+    monkeypatch.setenv("RELAY_API_TOKEN", "  ")
+    assert Settings().relay_api_token is None

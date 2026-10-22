@@ -33,9 +33,11 @@ class KeyRecord:
 
     pem: str
     fingerprint: str
+    # When this key was first seen upstream.
     fetched_at: datetime
+    # When upstream last confirmed it (fetch or 304).
+    last_checked_at: datetime
     version: int
-    bits: int
 
     def age_seconds(self, now: datetime | None = None) -> int:
         now = now or datetime.now(UTC)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # Cache-Control max-age for GET /api/v1/aztec-key (seconds). The key rotates
     # rarely and clients can force-refresh, so a few minutes is plenty fresh.
     relay_cache_max_age: int = Field(default=300, ge=0)
+
+    @field_validator("relay_api_token")
+    @classmethod
+    def _blank_token_means_unset(cls, value: str | None) -> str | None:
+        # `RELAY_API_TOKEN=` in .env must not turn on auth with an empty token.
+        return value.strip() or None if value is not None else None
 
     @property
     def installations_url(self) -> str:
