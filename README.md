@@ -10,22 +10,25 @@ The key lives in Firebase Remote Config (project id in `.env`, key `aztecKey`) a
 
 Fetching it directly from every app install has a privacy cost: each device becomes a separate **Firebase Installation** (FID + auth tokens + IP) in Google's records. This relay reduces that to **one shared installation** — end-user devices never contact Google at all; they only talk to this service.
 
+The relay keeps no record of its own users either: there is **no access log** (uvicorn runs with `--no-access-log`), so client IPs and request times are never written anywhere. App logs cover only refreshes and errors.
+
 ## What it does
 
 - **Daily refresh** — a background task re-fetches the key at a fixed UTC hour (+ 15 min jitter).
-- **On-demand refresh** — `POST /api/v1/aztec-key/refresh` for when the app's assign/contract request failed (likely rotation). Rate-limited (default 60 s) so a fleet of failing clients can't hammer Firebase.
+- **On-demand refresh** — `POST /api/v1/aztec-key/refresh` for when the app's assign/contract request failed (likely rotation). At most one upstream fetch per window (default 60 s), so a fleet of failing clients can't hammer Firebase: callers inside the window get the key that was just checked, or `429` if that check failed.
 - **Fetch on startup only when the cache is empty** — fresh deployments serve a key immediately; restarts with a good key don't touch upstream.
+- **Retries while there is no usable key** — after a failed startup fetch or a failed refresh, the scheduler retries with backoff (1 min, doubling, max 30 min) instead of waiting for the next daily slot.
 - **Never loses a good key** — upstream failures keep serving the cached key with `stale: true`; invalid PEMs (not RSA, < 2048 bits, unparseable) are rejected outright.
-- **Rotation history** — the last N keys (default 10) are kept in SQLite; the response's `version` increments on each *new* fingerprint.
+- **Rotation history** — the last N keys (default 10) are kept in SQLite; the response's `version` increments whenever the current key changes, including a rollback to an earlier key.
 
 ## API
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/v1/aztec-key` | Cached key. Never triggers a fetch. `503` if none was ever fetched. `Cache-Control: public, max-age=300` (`private` when `RELAY_API_TOKEN` is set; configurable via `RELAY_CACHE_MAX_AGE`). |
-| `POST /api/v1/aztec-key/refresh` | Force an upstream fetch (single-flight). `429` + `Retry-After` inside the rate window; `502` if upstream fails (old key stays cached, marked stale). Never cacheable (`no-store`). |
+| `GET /api/v1/aztec-key` | Cached key. Never triggers a fetch. `503` if none was ever fetched. `ETag` is the quoted fingerprint; send it back as `If-None-Match` to get a bodyless `304` until the key rotates. `Cache-Control: public, max-age=300` (`private` when `RELAY_API_TOKEN` is set; configurable via `RELAY_CACHE_MAX_AGE`). |
+| `POST /api/v1/aztec-key/refresh` | Upstream fetch (single-flight). Inside the rate window: the just-checked key (`200`), or `429` + `Retry-After` if that check failed. `502` if upstream fails (old key stays cached, marked stale). Never cacheable (`no-store`). |
 | `GET /health` | Liveness. |
-| `GET /ready` | Readiness — `ready: true` once a key is cached. |
+| `GET /ready` | Readiness — `200` + `ready: true` once a key is cached, `503` before. |
 
 `GET /api/v1/aztec-key` response:
 
@@ -34,6 +37,7 @@ Fetching it directly from every app install has a privacy cost: each device beco
   "pem": "-----BEGIN RSA PUBLIC KEY-----…",
   "fingerprint_sha256": "3a291ed03894511d…",
   "fetched_at": "2026-10-09T12:57:37.514901+00:00",
+  "last_checked_at": "2026-10-22T04:07:12.120031+00:00",
   "age_seconds": 10,
   "version": 1,
   "stale": false,
@@ -41,7 +45,7 @@ Fetching it directly from every app install has a privacy cost: each device beco
 }
 ```
 
-The fingerprint is SHA-256 over the key's SPKI (DER) encoding — a stable rotation signal: the app can compare fingerprints to detect a changed key cheaply.
+The fingerprint is SHA-256 over the key's SPKI (DER) encoding — a stable rotation signal: the app can compare fingerprints to detect a changed key cheaply. `fetched_at` is when the current key was first seen (`age_seconds` counts from it); `last_checked_at` is when upstream last confirmed it.
 
 When `RELAY_API_TOKEN` is set, the `/api/v1/*` endpoints require `Authorization: Bearer <token>`; unset = open.
 
@@ -49,7 +53,7 @@ When `RELAY_API_TOKEN` is set, the `/api/v1/*` endpoints require `Authorization:
 
 Mirrors the official client's flow (Firebase Installations SDK + Remote Config SDK, both pinned to the official app's identity — all values ship in the APK):
 
-1. **Installations** — `POST …/installations` with a client-generated FID (`^[cdef][\w-]{21}$`) → `fid` + `refreshToken`; `POST …/{fid}/authTokens:generate` → a week-long auth token. Created once, persisted, refreshed when expired (< 5 min left). A revoked FID triggers exactly one retry with a fresh installation.
+1. **Installations** — `POST …/installations` with a client-generated FID (`^[cdef][\w-]{21}$`) → `fid` + `refreshToken`; `POST …/{fid}/authTokens:generate` → a week-long auth token. Created once, persisted (auth token included), refreshed when expired (< 5 min left). Only a revoked or unknown FID (`401`/`403`/`404` on token generation) is replaced, with exactly one retry; network errors and `5xx` keep the shared installation.
 2. **Remote Config** — `POST …/namespaces/firebase:fetch` with `X-Android-Package`/`X-Android-Cert`/`X-Goog-Firebase-Installations-Auth` headers → flat `entries.aztecKey` map.
 
 The service persists `fid` + `refresh_token` in SQLite (`data/state.db`, WAL) so restarts reuse the **same** installation identity.
@@ -84,13 +88,15 @@ The container joins the external `nginx_proxy` network and publishes **no ports*
 
 The `data/` directory holds `state.db` — mount it somewhere durable, or you get a new Firebase Installation on every redeploy.
 
+Compose runs the container as `RELAY_UID:RELAY_GID` from `.env` (default `1000:1000`), not root. That user must own `data/` on the host. When upgrading an existing deployment whose `data/` was written by the old root container, hand it over once before starting, e.g. `sudo chown -R "$(id -u):$(id -g)" data` with `RELAY_UID`/`RELAY_GID` set to the same IDs.
+
 ## Tests
 
 ```bash
 uv run pytest
 ```
 
-Upstream calls are mocked with `httpx.MockTransport`; no network needed. The suite pins: PEM parsing (PKCS#1 + SPKI, weak/garbage/non-RSA rejection), fingerprint stability, the installation lifecycle (create → reuse token → restore from disk → retry on revoked FID), and the API contract (cache serving never fetches, rotation bumps `version`, rate limit `429` + `Retry-After`, failed refresh keeps the old key and flips `stale`, startup fetch only when the cache is empty, optional bearer auth).
+Upstream calls are mocked with `httpx.MockTransport`; no network needed. The suite pins: PEM parsing (PKCS#1 + SPKI, weak/garbage/non-RSA rejection), fingerprint stability, the installation lifecycle (create → reuse token → restore from disk → replace only a revoked FID, never on 5xx/network errors), and the API contract (cache serving never fetches, rotation bumps `version`, rate limit `429` + `Retry-After`, failed refresh keeps the old key and flips `stale`, startup fetch only when the cache is empty, optional bearer auth).
 
 ## License
 
