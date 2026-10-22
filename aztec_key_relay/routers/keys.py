@@ -7,6 +7,7 @@ import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..firebase import FirebaseError
 from ..keys import InvalidKeyError
@@ -14,9 +15,11 @@ from ..service import KeyEnvelope, KeyService, KeyUnavailableError, RefreshRateL
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["keys"])
-
 NO_STORE = {"Cache-Control": "no-store"}
+
+bearer_scheme = HTTPBearer(auto_error=False, description="Required only when RELAY_API_TOKEN is set.")
+
+router = APIRouter(tags=["keys"])
 
 
 def get_key_service() -> KeyService:
@@ -34,12 +37,13 @@ def _api_token() -> str | None:
     return app_state.api_token
 
 
-def require_token(authorization: Annotated[str | None, Header()] = None) -> None:
+def require_token(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)]) -> None:
     """Optional bearer auth: enforced only when RELAY_API_TOKEN is set."""
     expected_token = _api_token()
     if expected_token is None:
         return
-    if not secrets.compare_digest((authorization or "").encode(), f"Bearer {expected_token}".encode()):
+    presented = credentials.credentials if credentials else ""
+    if not secrets.compare_digest(presented.encode(), expected_token.encode()):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
 
 

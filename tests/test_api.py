@@ -159,6 +159,15 @@ def test_get_has_etag_and_no_max_age(tmp_path) -> None:
         client.__exit__(None, None, None)
 
 
+def test_swagger_declares_bearer_scheme(tmp_path) -> None:
+    client, _ = build_app([REAL_AZTEC_KEY_PEM], db_dir=str(tmp_path))
+    try:
+        schema = client.get("/openapi.json").json()
+        assert schema["components"]["securitySchemes"]["HTTPBearer"]["scheme"] == "bearer"
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_refresh_responses_are_never_cacheable(tmp_path) -> None:
     client, fake = build_app([REAL_AZTEC_KEY_PEM], min_fetch_interval=0, db_dir=str(tmp_path))
     try:
